@@ -14,6 +14,10 @@ const PDF_STORAGE_KEY = 'pdf_docs_v1';
 const PDF_FILE_DB = 'pdf_files_db_v1';
 const PDF_FILE_STORE = 'files';
 
+// API Base URL — set this to your backend URL (e.g., https://job-shob-backend.onrender.com)
+// If empty string, uses relative paths (works when backend serves frontend)
+let API_BASE_URL = '';
+
 document.addEventListener('DOMContentLoaded', init);
 
 function init() {
@@ -161,9 +165,22 @@ function setupRealtime() {
   }
 }
 
+/* Get API base URL — works both locally and after deployment */
+function getApiBase() {
+  // If explicitly set, use it
+  if (API_BASE_URL) return API_BASE_URL;
+  // Local dev: use relative paths
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+    return '';
+  }
+  // Production: if backend and frontend served from different origins, you MUST set API_BASE_URL
+  // For now, assume same origin (backend serves both)
+  return '';
+}
+
 /* Fetch latest lists from server APIs and store locally */
 async function fetchAllServerData() {
-  const base = '';
+  const base = getApiBase();
   try {
     const [linksRes, videosRes, pdfsRes] = await Promise.all([
       fetch(base + '/api/links'),
@@ -274,7 +291,8 @@ function handleLogin(e) {
     if (!pwd) return alert('Enter password');
     (async () => {
       try {
-        const res = await fetch('/api/auth/login', {
+        const base = getApiBase();
+        const res = await fetch(base + '/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password: pwd })
@@ -486,7 +504,8 @@ function handleAddVideo(e) {
   if (token) {
     (async () => {
       try {
-        const res = await fetch('/api/videos', {
+        const base = getApiBase();
+        const res = await fetch(base + '/api/videos', {
           method: 'POST',
           headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
           body: JSON.stringify({ title, youtubeUrlOrId: ytId })
@@ -549,8 +568,9 @@ function handleAddPdf(e) {
   if (token) {
     (async () => {
       try {
+        const base = getApiBase();
         // Request presigned upload URL
-        const presignRes = await fetch('/api/pdfs/presign', {
+        const presignRes = await fetch(base + '/api/pdfs/presign', {
           method: 'POST',
           headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
           body: JSON.stringify({ filename: file.name, contentType: file.type, size: file.size })
@@ -565,7 +585,7 @@ function handleAddPdf(e) {
         const uploadRes = await fetch(uploadUrl, { method: 'PUT', headers: { 'Content-Type': file.type }, body: file });
         if (!uploadRes.ok) return alert('Failed to upload PDF to storage');
         // Save metadata through server
-        const saveRes = await fetch('/api/pdfs', {
+        const saveRes = await fetch(base + '/api/pdfs', {
           method: 'POST',
           headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
           body: JSON.stringify({ title, fileKey, filename: file.name, contentType: file.type, size: file.size })
@@ -681,7 +701,8 @@ function deletePdf(id) {
   if (token && item && (item._id || item.id)) {
     (async () => {
       try {
-        const res = await fetch('/api/pdfs/' + encodeURIComponent(id), { method: 'DELETE', headers: getAuthHeaders() });
+        const base = getApiBase();
+        const res = await fetch(base + '/api/pdfs/' + encodeURIComponent(id), { method: 'DELETE', headers: getAuthHeaders() });
         if (!res.ok) {
           if (res.status === 401) { clearToken(); applyAuthState(false); return alert('Unauthorized'); }
           return alert('Failed to delete PDF');
@@ -823,7 +844,8 @@ function deleteVideo(id) {
   if (token && item && (item._id || item.id)) {
     (async () => {
       try {
-        const res = await fetch('/api/videos/' + encodeURIComponent(id), { method: 'DELETE', headers: getAuthHeaders() });
+        const base = getApiBase();
+        const res = await fetch(base + '/api/videos/' + encodeURIComponent(id), { method: 'DELETE', headers: getAuthHeaders() });
         if (!res.ok) {
           if (res.status === 401) { clearToken(); applyAuthState(false); return alert('Unauthorized'); }
           return alert('Failed to delete video');
@@ -909,7 +931,8 @@ function pinVideo(videoObj) {
   if (token && vidId) {
     (async () => {
       try {
-        const res = await fetch('/api/videos/' + encodeURIComponent(vidId) + '/pin', { method: 'POST', headers: getAuthHeaders() });
+        const base = getApiBase();
+        const res = await fetch(base + '/api/videos/' + encodeURIComponent(vidId) + '/pin', { method: 'POST', headers: getAuthHeaders() });
         if (!res.ok) {
           if (res.status === 401) { clearToken(); applyAuthState(false); return alert('Unauthorized'); }
           return alert('Failed to pin video');
@@ -948,7 +971,8 @@ function handleAddLink(e) {
   if (token) {
     (async () => {
       try {
-        const res = await fetch('/api/links', {
+        const base = getApiBase();
+        const res = await fetch(base + '/api/links', {
           method: 'POST',
           headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
           body: JSON.stringify({ title, url })
@@ -1066,7 +1090,8 @@ function deleteLink(id) {
   if (token && item && (item._id || item.id)) {
     (async () => {
       try {
-        const res = await fetch('/api/links/' + encodeURIComponent(id), { method: 'DELETE', headers: getAuthHeaders() });
+        const base = getApiBase();
+        const res = await fetch(base + '/api/links/' + encodeURIComponent(id), { method: 'DELETE', headers: getAuthHeaders() });
         if (!res.ok) {
           if (res.status === 401) { clearToken(); applyAuthState(false); return alert('Unauthorized'); }
           return alert('Failed to delete link');

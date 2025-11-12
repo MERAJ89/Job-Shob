@@ -236,6 +236,13 @@ Would you like me to make this more SEO-friendly for Google search (e.g., add jo
     <script src="main.js"></script>
   <!-- Socket.IO client (served by the backend) -->
   <script src="/socket.io/socket.io.js"></script>
+  <!-- Configuration: Set API_BASE_URL for deployment -->
+  <!-- Uncomment the line below and update URL when deploying frontend separately from backend -->
+  <script>
+    // For Vercel frontend + Render backend deployment, uncomment and set:
+    // window.API_BASE_URL = 'https://job-shob-backend.onrender.com';
+    // For local or same-origin deployment, leave API_BASE_URL undefined (will default to '')
+  </script>
     <!-- Fixed contact bar: WhatsApp and Telegram -->
     <div id="contact-fixed" class="contact-fixed" aria-hidden="false">
       <!-- Replace the hrefs below with your actual WhatsApp number and Telegram username -->
