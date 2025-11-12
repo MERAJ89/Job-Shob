@@ -68,12 +68,127 @@ function init() {
   loadVideos();
   loadPinnedVideo();
   loadPdfs();
-  renderLinks();
-  renderVideos();
-  renderPinnedVideo();
-  renderPdfs();
+  // Prefer server-sourced data when available
+  fetchAllServerData().then(() => {
+    renderLinks();
+    renderVideos();
+    renderPinnedVideo();
+    renderPdfs();
+  }).catch(() => {
+    // fallback to local renders
+    renderLinks();
+    renderVideos();
+    renderPinnedVideo();
+    renderPdfs();
+  });
+
+  // Setup realtime socket listeners
+  setupRealtime();
   // Don't show settings on load, only when clicking gear icon
   document.getElementById('modal-backdrop').classList.add('hidden');
+  
+  // Restore route from URL (for bookmarks and direct navigation)
+  restoreRouteFromURL();
+}
+
+/* Realtime setup using Socket.IO client */
+function setupRealtime() {
+  try {
+    const socket = io();
+
+    socket.on('connect', () => {
+      console.log('Realtime: connected to server');
+    });
+
+    socket.on('new:link', (link) => {
+      window._links = window._links || [];
+      // avoid duplicates if already present
+      if (!window._links.find(l => l._id ? l._id === link._id : l.id === link.id)) {
+        window._links.unshift(link);
+        saveLinks();
+        renderLinks();
+      }
+    });
+
+    socket.on('deleted:link', ({ id }) => {
+      window._links = (window._links || []).filter(l => (l._id || l.id) !== id);
+      saveLinks();
+      renderLinks();
+    });
+
+    socket.on('new:video', (video) => {
+      window._videos = window._videos || [];
+      if (!window._videos.find(v => (v._id || v.id) === (video._id || video.id))) {
+        window._videos.unshift(video);
+        saveVideos();
+        renderVideos();
+      }
+    });
+
+    socket.on('deleted:video', ({ id }) => {
+      window._videos = (window._videos || []).filter(v => (v._id || v.id) !== id);
+      saveVideos();
+      renderVideos();
+    });
+
+    socket.on('pinned:video', (video) => {
+      // server sends the pinned video document
+      window._pinnedVideo = video;
+      savePinnedVideo();
+      renderPinnedVideo();
+      renderVideos();
+    });
+
+    socket.on('new:pdf', (pdf) => {
+      // PDFs returned by API include fileKey/filename; push into list
+      window._pdfs = window._pdfs || [];
+      if (!window._pdfs.find(p => (p._id || p.id) === (pdf._id || pdf.id))) {
+        window._pdfs.unshift(pdf);
+        savePdfs();
+        renderPdfs();
+      }
+    });
+
+    socket.on('deleted:pdf', ({ id }) => {
+      window._pdfs = (window._pdfs || []).filter(p => (p._id || p.id) !== id);
+      savePdfs();
+      renderPdfs();
+    });
+
+    socket.on('disconnect', () => console.log('Realtime: disconnected'));
+  } catch (err) {
+    console.warn('Realtime: Socket.IO not available', err);
+  }
+}
+
+/* Fetch latest lists from server APIs and store locally */
+async function fetchAllServerData() {
+  const base = '';
+  try {
+    const [linksRes, videosRes, pdfsRes] = await Promise.all([
+      fetch(base + '/api/links'),
+      fetch(base + '/api/videos'),
+      fetch(base + '/api/pdfs')
+    ]);
+    if (linksRes.ok) {
+      const links = await linksRes.json();
+      window._links = links || [];
+      saveLinks();
+    }
+    if (videosRes.ok) {
+      const videos = await videosRes.json();
+      window._videos = videos || [];
+      saveVideos();
+    }
+    if (pdfsRes.ok) {
+      const pdfs = await pdfsRes.json();
+      window._pdfs = pdfs || [];
+      savePdfs();
+    }
+  } catch (err) {
+    console.warn('Failed to fetch server data, using local data instead', err);
+    throw err;
+  }
 }
 
 function toggleNav() {
@@ -112,31 +227,101 @@ function navClick(e) {
   e.preventDefault();
   const target = e.currentTarget.getAttribute('data-target');
   const section = document.getElementById(target);
-  if (section) section.scrollIntoView({behavior:'smooth',block:'start'});
+  if (section) {
+    // Update the URL to reflect the current page (without page reload)
+    window.history.pushState({ section: target }, '', '/' + target);
+    // Close mobile nav if open
+    closeNav();
+    // Scroll to section
+    section.scrollIntoView({behavior:'smooth',block:'start'});
+  }
+}
+
+// Handle browser back/forward button
+window.addEventListener('popstate', (e) => {
+  const target = e.state && e.state.section ? e.state.section : 'home';
+  const section = document.getElementById(target);
+  if (section) {
+    section.scrollIntoView({behavior:'smooth',block:'start'});
+  }
+});
+
+// On page load, check if URL has a route and scroll to it
+function restoreRouteFromURL() {
+  const path = window.location.pathname;
+  const match = path.match(/\/([a-z-]+)$/);
+  if (match) {
+    const target = match[1];
+    const section = document.getElementById(target);
+    if (section) {
+      // Use setTimeout to ensure DOM is ready
+      setTimeout(() => {
+        section.scrollIntoView({behavior:'auto',block:'start'});
+      }, 100);
+    }
+  }
 }
 
 /* Authentication (client-side) */
 function handleLogin(e) {
   e.preventDefault();
+  const emailEl = document.getElementById('owner-email');
   const pwd = document.getElementById('owner-password').value || '';
-  if (!pwd) return alert('Enter password');
-  getStoredOwnerHash().then(storedHash => {
-    hashPassword(pwd).then(h => {
-      if (h === storedHash) {
-        isOwner = true;
-        applyAuthState(true);
-        document.getElementById('owner-password').value = '';
-        renderOwnerLinksList();
-      } else {
-        alert('Incorrect password');
+  const email = emailEl ? (emailEl.value || '').trim() : '';
+
+  // If an email is provided, try server-side auth. Otherwise, fall back to legacy client-only password.
+  if (email) {
+    if (!pwd) return alert('Enter password');
+    (async () => {
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password: pwd })
+        });
+        if (!res.ok) {
+          if (res.status === 401) return alert('Invalid credentials');
+          const body = await res.json().catch(() => ({}));
+          return alert('Login failed: ' + (body.error || res.statusText));
+        }
+        const data = await res.json();
+        if (data && data.token) {
+          setToken(data.token);
+          isOwner = true;
+          applyAuthState(true);
+          document.getElementById('owner-password').value = '';
+          if (emailEl) emailEl.value = '';
+          renderOwnerLinksList();
+        } else {
+          alert('Login response did not include a token');
+        }
+      } catch (err) {
+        console.error('Login error', err);
+        alert('Login failed: ' + err.message);
       }
+    })();
+  } else {
+    // legacy local password flow
+    if (!pwd) return alert('Enter password');
+    getStoredOwnerHash().then(storedHash => {
+      hashPassword(pwd).then(h => {
+        if (h === storedHash) {
+          isOwner = true;
+          applyAuthState(true);
+          document.getElementById('owner-password').value = '';
+          renderOwnerLinksList();
+        } else {
+          alert('Incorrect password');
+        }
+      });
     });
-  });
+  }
 }
 
 function handleLogout(e) {
   e && e.preventDefault();
   isOwner = false;
+  clearToken();
   applyAuthState(false);
   // Close modal on logout
   closeModal(e);
@@ -173,6 +358,15 @@ async function getStoredOwnerHash() {
   if (stored) return stored;
   // fallback to legacy plain password hashed at runtime
   return await hashPassword(OWNER_PASSWORD);
+}
+
+// Token helpers (server auth)
+function setToken(t) { try { sessionStorage.setItem('owner_token', t); } catch(e) {} }
+function getToken() { try { return sessionStorage.getItem('owner_token'); } catch(e) { return null; } }
+function clearToken() { try { sessionStorage.removeItem('owner_token'); } catch(e) {} }
+function getAuthHeaders() {
+  const t = getToken();
+  return t ? { Authorization: 'Bearer ' + t } : {};
 }
 
 
@@ -287,19 +481,41 @@ function handleAddVideo(e) {
   const ytId = extractYouTubeID(url);
   if (!ytId) return alert('Unable to detect YouTube video ID from the input.');
 
-  const obj = {
-    id: Date.now().toString(36),
-    title,
-    youtubeId: ytId,
-    created: new Date().toISOString()
-  };
-
-  window._videos = window._videos || [];
-  window._videos.unshift(obj);
-  saveVideos();
-  renderVideos();
-
-  e.target.reset();
+  // If logged in via server, POST to API; otherwise fall back to local behavior
+  const token = getToken();
+  if (token) {
+    (async () => {
+      try {
+        const res = await fetch('/api/videos', {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
+          body: JSON.stringify({ title, youtubeUrlOrId: ytId })
+        });
+        if (!res.ok) {
+          if (res.status === 401) { clearToken(); applyAuthState(false); return alert('Unauthorized - please login again'); }
+          const body = await res.json().catch(() => ({}));
+          return alert('Failed to add video: ' + (body.error || res.statusText));
+        }
+        const video = await res.json();
+        // server will emit new:video — but also update client immediately
+        window._videos = window._videos || [];
+        window._videos.unshift(video);
+        saveVideos();
+        renderVideos();
+        e.target.reset();
+      } catch (err) {
+        console.error('Add video failed', err);
+        alert('Failed to add video: ' + err.message);
+      }
+    })();
+  } else {
+    const obj = { id: Date.now().toString(36), title, youtubeId: ytId, created: new Date().toISOString() };
+    window._videos = window._videos || [];
+    window._videos.unshift(obj);
+    saveVideos();
+    renderVideos();
+    e.target.reset();
+  }
 }
 
 /* PDF management: store simple objects {id,title,url,created} */
@@ -328,25 +544,68 @@ function handleAddPdf(e) {
   const file = fileInput.files[0];
   if (file.type !== 'application/pdf') return alert('Please upload a valid PDF file');
 
-  // Save file into IndexedDB and create a manifest entry
-  saveFileToIDB(file).then(fileId => {
-    const obj = {
-      id: Date.now().toString(36),
-      title,
-      fileId,
-      filename: file.name,
-      created: new Date().toISOString()
-    };
+  // If logged in with server token, use presign+upload flow, otherwise fallback to local IDB
+  const token = getToken();
+  if (token) {
+    (async () => {
+      try {
+        // Request presigned upload URL
+        const presignRes = await fetch('/api/pdfs/presign', {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
+          body: JSON.stringify({ filename: file.name, contentType: file.type, size: file.size })
+        });
+        if (!presignRes.ok) {
+          if (presignRes.status === 401) { clearToken(); applyAuthState(false); return alert('Unauthorized - please login again'); }
+          const body = await presignRes.json().catch(() => ({}));
+          return alert('Failed to get presigned URL: ' + (body.error || presignRes.statusText));
+        }
+        const { uploadUrl, fileKey } = await presignRes.json();
+        // Upload file directly to S3 using the presigned URL
+        const uploadRes = await fetch(uploadUrl, { method: 'PUT', headers: { 'Content-Type': file.type }, body: file });
+        if (!uploadRes.ok) return alert('Failed to upload PDF to storage');
+        // Save metadata through server
+        const saveRes = await fetch('/api/pdfs', {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
+          body: JSON.stringify({ title, fileKey, filename: file.name, contentType: file.type, size: file.size })
+        });
+        if (!saveRes.ok) {
+          const body = await saveRes.json().catch(() => ({}));
+          return alert('Failed to register PDF: ' + (body.error || saveRes.statusText));
+        }
+        const pdf = await saveRes.json();
+        window._pdfs = window._pdfs || [];
+        window._pdfs.unshift(pdf);
+        savePdfs();
+        renderPdfs();
+        e.target.reset();
+      } catch (err) {
+        console.error('PDF upload failed', err);
+        alert('PDF upload failed: ' + err.message);
+      }
+    })();
+  } else {
+    // Save file into IndexedDB and create a manifest entry
+    saveFileToIDB(file).then(fileId => {
+      const obj = {
+        id: Date.now().toString(36),
+        title,
+        fileId,
+        filename: file.name,
+        created: new Date().toISOString()
+      };
 
-    window._pdfs = window._pdfs || [];
-    window._pdfs.unshift(obj);
-    savePdfs();
-    renderPdfs();
-    e.target.reset();
-  }).catch(err => {
-    console.error('Failed to save file', err);
-    alert('Failed to save PDF file locally. See console for details.');
-  });
+      window._pdfs = window._pdfs || [];
+      window._pdfs.unshift(obj);
+      savePdfs();
+      renderPdfs();
+      e.target.reset();
+    }).catch(err => {
+      console.error('Failed to save file', err);
+      alert('Failed to save PDF file locally. See console for details.');
+    });
+  }
 }
 
 function renderPdfs() {
@@ -406,7 +665,7 @@ function renderPdfs() {
 
     if (isOwner) {
       const del = document.createElement('button'); del.className = 'btn btn-ghost'; del.textContent = 'Delete';
-      del.addEventListener('click', () => { if (confirm('Delete this PDF?')) { deletePdf(p.id); } });
+      del.addEventListener('click', () => { if (confirm('Delete this PDF?')) { deletePdf(p._id || p.id); } });
       right.appendChild(del);
     }
 
@@ -416,15 +675,32 @@ function renderPdfs() {
 }
 
 function deletePdf(id) {
-  // Remove manifest entry
-  const item = (window._pdfs || []).find(x => x.id === id);
-  if (item && item.fileId) {
-    // delete file blob from IDB
-    deleteFileFromIDB(item.fileId).catch(err => console.error('Failed to delete file from IDB', err));
+  // If owner + token, call server API
+  const token = getToken();
+  const item = (window._pdfs || []).find(x => (x._id || x.id) === id);
+  if (token && item && (item._id || item.id)) {
+    (async () => {
+      try {
+        const res = await fetch('/api/pdfs/' + encodeURIComponent(id), { method: 'DELETE', headers: getAuthHeaders() });
+        if (!res.ok) {
+          if (res.status === 401) { clearToken(); applyAuthState(false); return alert('Unauthorized'); }
+          return alert('Failed to delete PDF');
+        }
+        // remove locally
+        if (item.fileId) deleteFileFromIDB(item.fileId).catch(err => console.error('Failed to delete file from IDB', err));
+        window._pdfs = (window._pdfs || []).filter(x => (x._id || x.id) !== id);
+        savePdfs();
+        renderPdfs();
+      } catch (err) { console.error(err); alert('Failed to delete PDF: ' + err.message); }
+    })();
+  } else {
+    // local-only deletion
+    const localItem = (window._pdfs || []).find(x => x.id === id);
+    if (localItem && localItem.fileId) deleteFileFromIDB(localItem.fileId).catch(err => console.error('Failed to delete file from IDB', err));
+    window._pdfs = (window._pdfs || []).filter(x => x.id !== id);
+    savePdfs();
+    renderPdfs();
   }
-  window._pdfs = (window._pdfs || []).filter(x => x.id !== id);
-  savePdfs();
-  renderPdfs();
 }
 
 /* IndexedDB helpers for storing PDF files (blobs) */
@@ -542,13 +818,32 @@ function renderVideos() {
 }
 
 function deleteVideo(id) {
-  window._videos = (window._videos || []).filter(x => x.id !== id);
-  saveVideos();
-  // If the deleted video was pinned, also remove the pinned video
-  if (window._pinnedVideo && window._pinnedVideo.id === id) {
-    unpinVideo();
+  const token = getToken();
+  const item = (window._videos || []).find(x => (x._id || x.id) === id);
+  if (token && item && (item._id || item.id)) {
+    (async () => {
+      try {
+        const res = await fetch('/api/videos/' + encodeURIComponent(id), { method: 'DELETE', headers: getAuthHeaders() });
+        if (!res.ok) {
+          if (res.status === 401) { clearToken(); applyAuthState(false); return alert('Unauthorized'); }
+          return alert('Failed to delete video');
+        }
+        window._videos = (window._videos || []).filter(x => (x._id || x.id) !== id);
+        saveVideos();
+        if (window._pinnedVideo && (window._pinnedVideo._id || window._pinnedVideo.id) === id) {
+          unpinVideo();
+        }
+        renderVideos();
+      } catch (err) { console.error(err); alert('Failed to delete video: ' + err.message); }
+    })();
+  } else {
+    window._videos = (window._videos || []).filter(x => x.id !== id);
+    saveVideos();
+    if (window._pinnedVideo && window._pinnedVideo.id === id) {
+      unpinVideo();
+    }
+    renderVideos();
   }
-  renderVideos();
 }
 
 /* Pinned video helpers: persist a single pinned video until owner removes it */
@@ -609,10 +904,29 @@ function renderPinnedVideo() {
 }
 
 function pinVideo(videoObj) {
-  window._pinnedVideo = { id: videoObj.id, title: videoObj.title, youtubeId: videoObj.youtubeId, created: new Date().toISOString() };
-  savePinnedVideo();
-  renderPinnedVideo();
-  renderVideos();
+  const token = getToken();
+  const vidId = videoObj._id || videoObj.id;
+  if (token && vidId) {
+    (async () => {
+      try {
+        const res = await fetch('/api/videos/' + encodeURIComponent(vidId) + '/pin', { method: 'POST', headers: getAuthHeaders() });
+        if (!res.ok) {
+          if (res.status === 401) { clearToken(); applyAuthState(false); return alert('Unauthorized'); }
+          return alert('Failed to pin video');
+        }
+        const v = await res.json();
+        window._pinnedVideo = v;
+        savePinnedVideo();
+        renderPinnedVideo();
+        renderVideos();
+      } catch (err) { console.error('Failed to pin video', err); alert('Failed to pin video: ' + err.message); }
+    })();
+  } else {
+    window._pinnedVideo = { id: videoObj.id, title: videoObj.title, youtubeId: videoObj.youtubeId, created: new Date().toISOString() };
+    savePinnedVideo();
+    renderPinnedVideo();
+    renderVideos();
+  }
 }
 
 function unpinVideo() {
@@ -630,19 +944,40 @@ function handleAddLink(e) {
   if (!title || !url) { alert('Please provide title and URL'); return; }
   if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
 
-  const obj = {
-    id: Date.now().toString(36),
-    title,
-    url
-  };
-
-  window._links = window._links || [];
-  window._links.unshift(obj); // newest first
-  saveLinks();
-  renderLinks();
-
-  // reset form
-  e.target.reset();
+  const token = getToken();
+  if (token) {
+    (async () => {
+      try {
+        const res = await fetch('/api/links', {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
+          body: JSON.stringify({ title, url })
+        });
+        if (!res.ok) {
+          if (res.status === 401) { clearToken(); applyAuthState(false); return alert('Unauthorized - please login again'); }
+          const body = await res.json().catch(() => ({}));
+          return alert('Failed to add link: ' + (body.error || res.statusText));
+        }
+        const link = await res.json();
+        // server will emit new:link; add locally anyway
+        window._links = window._links || [];
+        window._links.unshift(link);
+        saveLinks();
+        renderLinks();
+        e.target.reset();
+      } catch (err) {
+        console.error('Add link failed', err);
+        alert('Failed to add link: ' + err.message);
+      }
+    })();
+  } else {
+    const obj = { id: Date.now().toString(36), title, url };
+    window._links = window._links || [];
+    window._links.unshift(obj);
+    saveLinks();
+    renderLinks();
+    e.target.reset();
+  }
 }
 
 function renderLinks() {
@@ -718,7 +1053,7 @@ function renderOwnerLinksList() {
     const open = document.createElement('a');
     open.href = l.url; open.target = '_blank'; open.className = 'btn btn-ghost'; open.textContent = 'Open';
     const del = document.createElement('button'); del.className = 'btn'; del.textContent = 'Delete';
-    del.addEventListener('click', () => { if (confirm('Delete this link?')) { deleteLink(l.id); renderOwnerLinksList(); } });
+    del.addEventListener('click', () => { if (confirm('Delete this link?')) { deleteLink(l._id || l.id); renderOwnerLinksList(); } });
     right.appendChild(open); right.appendChild(del);
     row.appendChild(left); row.appendChild(right);
     holder.appendChild(row);
@@ -726,9 +1061,26 @@ function renderOwnerLinksList() {
 }
 
 function deleteLink(id) {
-  window._links = (window._links || []).filter(x => x.id !== id);
-  saveLinks();
-  renderLinks();
+  const token = getToken();
+  const item = (window._links || []).find(x => (x._id || x.id) === id);
+  if (token && item && (item._id || item.id)) {
+    (async () => {
+      try {
+        const res = await fetch('/api/links/' + encodeURIComponent(id), { method: 'DELETE', headers: getAuthHeaders() });
+        if (!res.ok) {
+          if (res.status === 401) { clearToken(); applyAuthState(false); return alert('Unauthorized'); }
+          return alert('Failed to delete link');
+        }
+        window._links = (window._links || []).filter(x => (x._id || x.id) !== id);
+        saveLinks();
+        renderLinks();
+      } catch (err) { console.error(err); alert('Failed to delete link: ' + err.message); }
+    })();
+  } else {
+    window._links = (window._links || []).filter(x => x.id !== id);
+    saveLinks();
+    renderLinks();
+  }
 }
 
 /* Contact form handling */

@@ -123,7 +123,10 @@ Would you like me to make this more SEO-friendly for Google search (e.g., add jo
           <h3 id="modal-title">Owner Login</h3>
 
           <div id="modal-login">
-            <p class="muted">Enter your password to manage links.</p>
+            <p class="muted">Enter your email and password to manage links.</p>
+            <div class="form-row">
+              <input id="owner-email" type="email" placeholder="Owner email" aria-label="Owner email">
+            </div>
             <div class="form-row">
               <input id="owner-password" type="password" placeholder="Owner password" aria-label="Owner password">
               <button id="btn-login" class="btn">Login</button>
@@ -231,6 +234,8 @@ Would you like me to make this more SEO-friendly for Google search (e.g., add jo
     </footer>
 
     <script src="main.js"></script>
+  <!-- Socket.IO client (served by the backend) -->
+  <script src="/socket.io/socket.io.js"></script>
     <!-- Fixed contact bar: WhatsApp and Telegram -->
     <div id="contact-fixed" class="contact-fixed" aria-hidden="false">
       <!-- Replace the hrefs below with your actual WhatsApp number and Telegram username -->
